@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WHP Dashboard — Production Tracker</title>
+
+<!--
+  index.html v2 — Three-tab Dashboard
+  =====================================
+  Tab 1: Production  — live well data, KPIs, contribution chart
+  Tab 2: Notifications — status change timeline (SHUT / ON events)
+  Tab 3: Shutdown Causes — table of all shut-in events with cause details
+
+  DATA FLOW:
+    Every 5s → fetchData()   → GET /data   → renderProduction()
+    Every 5s → fetchEvents() → GET /events → renderNotifications() + renderCauses()
+-->
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;600;700&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-0:        #080e14;
+  --bg-1:        #0d1620;
+  --bg-2:        #111e2e;
+  --bg-3:        #162436;
+  --border:      #1c3048;
+  --border-hi:   #1e5080;
+  --text-pri:    #ccd9e6;
+  --text-dim:    #5a7a96;
+  --text-muted:  #3a5570;
+  --accent:      #1e90d4;
+  --accent-glow: rgba(30,144,212,0.18);
+  --green:       #22c97a;
+  --green-dim:   #0d3d25;
+  --red:         #e04a4a;
+  --red-dim:     #3d1010;
+  --yellow:      #f0c030;
+  --yellow-dim:  #3a2a00;
+  --purple:      #b06cf0;
+  --mono:        'Share Tech Mono', monospace;
+  --sans:        'Barlow', sans-serif;
+}
+
+html, body {
+  background: var(--bg-0);
+  color: var(--text-pri);
+  font-family: var(--sans);
+  font-size: 14px;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Scanline overlay */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    0deg, transparent, transparent 2px,
+    rgba(0,0,0,0.04) 2px, rgba(0,0,0,0.04) 4px
+  );
+  pointer-events: none; z-index: 9999;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+.header {
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  padding: 0 28px; height: 58px;
+  display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; z-index: 100;
+}
+.header-left { display: flex; align-items: center; gap: 16px; }
+.logo-mark {
+  width: 34px; height: 34px;
+  border: 2px solid var(--accent); border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 13px; color: var(--accent);
+  font-weight: bold; box-shadow: 0 0 12px var(--accent-glow);
+}
+.header-title { font-size: 15px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
+.header-subtitle { font-size: 11px; color: var(--text-dim); letter-spacing: 1px; margin-top: 1px; }
+.header-right { display: flex; align-items: center; gap: 22px; font-family: var(--mono); font-size: 12px; }
+.status-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 20px;
+  border: 1px solid var(--border); background: var(--bg-2); font-size: 11px;
+}
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); transition: background 0.4s; }
+.status-dot.live  { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+.status-dot.error { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+#clock, #last-update { color: var(--text-dim); font-size: 11px; }
+#last-update span { color: var(--accent); }
+
+/* ── Error banner ───────────────────────────────────────────────────────── */
+#error-banner {
+  display: none;
+  background: var(--red-dim); border-bottom: 1px solid var(--red);
+  padding: 10px 28px; font-size: 12px; color: var(--red); font-family: var(--mono);
+}
+#error-banner.visible { display: flex; align-items: center; gap: 10px; }
+
+/* ── Tab navigation ─────────────────────────────────────────────────────── */
+.tab-nav {
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  padding: 0 28px;
+  display: flex; gap: 0;
+}
+.tab-btn {
+  padding: 12px 24px;
+  cursor: pointer;
+  font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1.5px;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+  display: flex; align-items: center; gap: 8px;
+  user-select: none;
+}
+.tab-btn:hover { color: var(--text-pri); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Notification badge on tab */
+.tab-badge {
+  background: var(--red);
+  color: #fff;
+  font-size: 10px; font-weight: 700;
+  padding: 1px 6px; border-radius: 8px;
+  min-width: 18px; text-align: center;
+  display: none;
+}
+.tab-badge.visible { display: inline-block; }
+
+/* ── Tab content ────────────────────────────────────────────────────────── */
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* ── Main content area ──────────────────────────────────────────────────── */
+.main { padding: 24px 28px; max-width: 1400px; margin: 0 auto; }
+
+/* ── KPI Row ────────────────────────────────────────────────────────────── */
+.kpi-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 24px; }
+.kpi-card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 18px 20px;
+  position: relative; overflow: hidden; transition: border-color 0.3s;
+}
+.kpi-card:hover { border-color: var(--border-hi); }
+.kpi-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--card-accent, var(--accent)); opacity: 0.8;
+}
+.kpi-card.green  { --card-accent: var(--green); }
+.kpi-card.purple { --card-accent: var(--purple); }
+.kpi-card.yellow { --card-accent: var(--yellow); }
+.kpi-card.red    { --card-accent: var(--red); }
+.kpi-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-dim); margin-bottom: 10px; }
+.kpi-value-row { display: flex; align-items: baseline; gap: 6px; }
+.kpi-value { font-family: var(--mono); font-size: 30px; color: var(--text-pri); line-height: 1; }
+.kpi-unit  { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+.kpi-icon  { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); font-size: 28px; opacity: 0.07; }
+
+/* ── Section header ─────────────────────────────────────────────────────── */
+.section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.section-label  { font-size: 10px; text-transform: uppercase; letter-spacing: 2px; color: var(--text-dim); white-space: nowrap; }
+.section-line   { flex: 1; height: 1px; background: var(--border); }
+
+/* ── Well table ─────────────────────────────────────────────────────────── */
+.table-wrap {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; margin-bottom: 24px;
+}
+table { width: 100%; border-collapse: collapse; }
+thead tr { background: var(--bg-3); border-bottom: 1px solid var(--border); }
+th {
+  padding: 11px 14px; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 1.5px; color: var(--text-dim); font-weight: 600; text-align: left;
+}
+th:not(:first-child) { text-align: right; }
+tbody tr { border-bottom: 1px solid var(--border); transition: background 0.15s; }
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: rgba(30,144,212,0.04); }
+tbody tr.row-shut { background: rgba(61,16,16,0.35); }
+tbody tr.row-shut:hover { background: rgba(61,16,16,0.55); }
+td { padding: 11px 14px; font-family: var(--mono); font-size: 13px; }
+td:not(:first-child) { text-align: right; }
+.td-well { font-weight: 600; color: var(--accent); }
+
+/* Status badges */
+.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; font-family: var(--sans); }
+.badge-on   { background: var(--green-dim);  color: var(--green);  border: 1px solid rgba(34,201,122,0.3); }
+.badge-shut { background: var(--red-dim);    color: var(--red);    border: 1px solid rgba(224,74,74,0.3); }
+.badge-test { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(240,192,48,0.3); }
+.badge-note { background: var(--bg-3);       color: var(--accent); border: 1px solid var(--border); }
+.badge-other{ background: var(--bg-3);       color: var(--text-dim); border: 1px solid var(--border); }
+
+/* Choke bar */
+.choke-wrap { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.choke-bar  { width: 50px; height: 4px; background: var(--bg-3); border-radius: 2px; overflow: hidden; }
+.choke-fill { height: 100%; background: var(--yellow); border-radius: 2px; transition: width 0.5s ease; }
+
+.num-oil   { color: var(--green); }
+.num-gas   { color: var(--purple); }
+.num-water { color: #60b4f0; }
+.num-press { color: var(--text-pri); }
+.num-zero  { color: var(--text-muted); }
+
+/* ── Bottom row ─────────────────────────────────────────────────────────── */
+.bottom-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.panel { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; }
+.panel-title { font-size: 10px; text-transform: uppercase; letter-spacing: 2px; color: var(--text-dim); margin-bottom: 16px; }
+.contrib-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.contrib-well { font-family: var(--mono); font-size: 12px; color: var(--accent); width: 36px; }
+.contrib-track { flex: 1; height: 8px; background: var(--bg-3); border-radius: 4px; overflow: hidden; }
+.contrib-fill  { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+.contrib-val   { font-family: var(--mono); font-size: 12px; color: var(--text-pri); width: 70px; text-align: right; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TAB 2 — NOTIFICATIONS
+═══════════════════════════════════════════════════════════════════════════ */
+
+/* Filter pills */
+.filter-row {
+  display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;
+  align-items: center;
+}
+.filter-pill {
+  padding: 5px 14px; border-radius: 20px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+  cursor: pointer; border: 1px solid var(--border);
+  background: var(--bg-2); color: var(--text-dim);
+  transition: all 0.2s; user-select: none;
+}
+.filter-pill:hover { border-color: var(--border-hi); color: var(--text-pri); }
+.filter-pill.active-all  { background: var(--bg-3); color: var(--text-pri); border-color: var(--border-hi); }
+.filter-pill.active-shut { background: var(--red-dim);    color: var(--red);    border-color: var(--red); }
+.filter-pill.active-on   { background: var(--green-dim);  color: var(--green);  border-color: var(--green); }
+.filter-pill.active-test { background: var(--yellow-dim); color: var(--yellow); border-color: var(--yellow); }
+.filter-pill.active-note { background: var(--bg-3);       color: var(--accent); border-color: var(--accent); }
+
+.filter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-right: 4px; }
+
+/* Timeline */
+.timeline {
+  position: relative;
+  padding-left: 28px;
+}
+/* Vertical line */
+.timeline::before {
+  content: '';
+  position: absolute; left: 9px; top: 8px; bottom: 8px;
+  width: 2px; background: var(--border);
+  border-radius: 1px;
+}
+
+.timeline-item {
+  position: relative;
+  margin-bottom: 0;
+  padding: 0 0 20px 20px;
+  transition: opacity 0.2s;
+}
+.timeline-item.hidden { display: none; }
+
+/* Dot on the timeline */
+.timeline-dot {
+  position: absolute; left: -19px; top: 6px;
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--bg-0);
+  z-index: 1;
+}
+.dot-shut { background: var(--red);    box-shadow: 0 0 8px rgba(224,74,74,0.5); }
+.dot-on   { background: var(--green);  box-shadow: 0 0 8px rgba(34,201,122,0.5); }
+.dot-test { background: var(--yellow); box-shadow: 0 0 8px rgba(240,192,48,0.5); }
+.dot-note { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+
+/* Timeline card */
+.timeline-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  transition: border-color 0.2s;
+}
+.timeline-card:hover { border-color: var(--border-hi); }
+
+.timeline-card.card-shut { border-left: 3px solid var(--red); }
+.timeline-card.card-on   { border-left: 3px solid var(--green); }
+.timeline-card.card-test { border-left: 3px solid var(--yellow); }
+.timeline-card.card-note { border-left: 3px solid var(--accent); }
+
+.tc-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+}
+.tc-message {
+  font-size: 14px; font-weight: 600; color: var(--text-pri); flex: 1;
+}
+.tc-time {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  white-space: nowrap;
+}
+.tc-cause {
+  font-size: 12px; color: var(--text-dim); line-height: 1.6;
+  padding: 8px 10px;
+  background: var(--bg-3); border-radius: 5px;
+  border-left: 2px solid var(--border);
+}
+.tc-cause-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-muted); margin-bottom: 4px;
+}
+
+/* Empty state */
+.empty-state {
+  text-align: center; padding: 60px 20px;
+  color: var(--text-muted); font-family: var(--mono); font-size: 13px;
+}
+.empty-state .icon { font-size: 36px; margin-bottom: 12px; opacity: 0.4; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TAB 3 — SHUTDOWN CAUSES
+═══════════════════════════════════════════════════════════════════════════ */
+
+.causes-table-wrap {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+
+/* Cause text cell — left aligned, wraps */
+.td-cause {
+  text-align: left !important;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  max-width: 480px;
+}
+
+/* Summary stats row above causes table */
+.cause-stats {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 12px; margin-bottom: 20px;
+}
+.cause-stat-card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px; text-align: center;
+}
+.cause-stat-num   { font-family: var(--mono); font-size: 28px; color: var(--text-pri); }
+.cause-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-top: 4px; }
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+.footer {
+  margin-top: 28px; padding: 14px 28px;
+  border-top: 1px solid var(--border);
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--text-muted); font-family: var(--mono);
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .kpi-row { grid-template-columns: repeat(2,1fr); }
+  .bottom-row { grid-template-columns: 1fr; }
+  .cause-stats { grid-template-columns: repeat(3,1fr); }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo-mark">WHP</div>
+    <div>
+      <div class="header-title" id="header-title">Production Dashboard</div>
+      <div class="header-subtitle" id="header-subtitle">ONGC Offshore · Surface Operations · Live Data</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div id="last-update">Updated: <span id="update-time">—</span></div>
+    <div id="clock">—</div>
+    <div class="status-pill">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">Connecting…</span>
+    </div>
+  </div>
+</header>
+
+<!-- ── Error Banner ─────────────────────────────────────────────────────────── -->
+<div id="error-banner">
+  ⚠ <span id="error-msg">Cannot reach server. Is server.py running?</span>
+</div>
+
+<!-- ── Tab Navigation ───────────────────────────────────────────────────────── -->
+<nav class="tab-nav">
+  <div class="tab-btn active" onclick="switchTab('production')" id="tab-btn-production">
+    ⬡ Production
+  </div>
+  <div class="tab-btn" onclick="switchTab('notifications')" id="tab-btn-notifications">
+    ◎ Notifications
+    <span class="tab-badge" id="notif-badge">0</span>
+  </div>
+  <div class="tab-btn" onclick="switchTab('causes')" id="tab-btn-causes">
+    ⊟ Shutdown Causes
+  </div>
+</nav>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+  TAB 1 — PRODUCTION
+══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-pane active" id="pane-production">
+<main class="main">
+
+  <!-- KPI Cards -->
+  <div class="kpi-row">
+    <div class="kpi-card green">
+      <div class="kpi-label">Total Oil Production</div>
+      <div class="kpi-value-row"><div class="kpi-value" id="kpi-oil">—</div><div class="kpi-unit">BOPD</div></div>
+      <div class="kpi-icon">🛢</div>
+    </div>
+    <div class="kpi-card purple">
+      <div class="kpi-label">Total Gas Production</div>
+      <div class="kpi-value-row"><div class="kpi-value" id="kpi-gas">—</div><div class="kpi-unit">MMSCFD</div></div>
+      <div class="kpi-icon">💨</div>
+    </div>
+    <div class="kpi-card yellow">
+      <div class="kpi-label">Total Water Production</div>
+      <div class="kpi-value-row"><div class="kpi-value" id="kpi-water">—</div><div class="kpi-unit">BWPD</div></div>
+      <div class="kpi-icon">💧</div>
+    </div>
+    <div class="kpi-card" id="kpi-wells-card">
+      <div class="kpi-label">Wells On Production</div>
+      <div class="kpi-value-row">
+        <div class="kpi-value" id="kpi-wells">—</div>
+        <div class="kpi-unit" id="kpi-wells-total">/ —</div>
+      </div>
+      <div class="kpi-icon">⛽</div>
+    </div>
+  </div>
+
+  <!-- Well Table -->
+  <div class="section-header">
+    <div class="section-label">Well Status &amp; Production</div>
+    <div class="section-line"></div>
+    <div style="font-size:10px;color:var(--text-muted);font-family:var(--mono);white-space:nowrap;">AUTO-REFRESH 5s</div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Well</th><th>Status</th><th>Choke (64ths)</th>
+          <th>WHP (psi)</th><th>THP (psi)</th>
+          <th>Oil (BOPD)</th><th>Gas (MMSCFD)</th><th>Water (BWPD)</th>
+        </tr>
+      </thead>
+      <tbody id="well-tbody">
+        <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:30px;font-family:var(--mono);">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Bottom row -->
+  <div class="bottom-row">
+    <div class="panel">
+      <div class="panel-title">Oil Contribution by Well</div>
+      <div id="contrib-chart"><div style="color:var(--text-muted);font-size:12px;">Loading…</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">Recent Events (Last 3)</div>
+      <div id="recent-events-panel"><div style="color:var(--text-muted);font-size:12px;">Loading…</div></div>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+  TAB 2 — NOTIFICATIONS
+══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-pane" id="pane-notifications">
+<main class="main">
+
+  <div class="section-header" style="margin-bottom:16px;">
+    <div class="section-label">Well Event Timeline</div>
+    <div class="section-line"></div>
+    <div style="font-size:10px;color:var(--text-muted);font-family:var(--mono);white-space:nowrap;">NEWEST FIRST · AUTO-REFRESH 5s</div>
+  </div>
+
+  <!-- Filter pills -->
+  <div class="filter-row">
+    <span class="filter-label">Filter:</span>
+    <div class="filter-pill active-all" id="filter-all"   onclick="applyFilter('ALL')">All Events</div>
+    <div class="filter-pill"           id="filter-shut"  onclick="applyFilter('SHUT')">🔴 Shut In</div>
+    <div class="filter-pill"           id="filter-on"    onclick="applyFilter('ON')">🟢 Started</div>
+    <div class="filter-pill"           id="filter-test"  onclick="applyFilter('TEST')">🟡 Test</div>
+    <div class="filter-pill"           id="filter-note"  onclick="applyFilter('NOTE')">🔵 Notes</div>
+  </div>
+
+  <!-- Timeline -->
+  <div class="timeline" id="notification-timeline">
+    <div class="empty-state">
+      <div class="icon">📋</div>
+      Loading events…
+    </div>
+  </div>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+  TAB 3 — SHUTDOWN CAUSES
+══════════════════════════════════════════════════════════════════════════ -->
+<div class="tab-pane" id="pane-causes">
+<main class="main">
+
+  <!-- Summary stats -->
+  <div class="cause-stats" id="cause-stats">
+    <div class="cause-stat-card">
+      <div class="cause-stat-num" id="stat-total-shut">—</div>
+      <div class="cause-stat-label">Total Shut-in Events</div>
+    </div>
+    <div class="cause-stat-card">
+      <div class="cause-stat-num" id="stat-wells-affected">—</div>
+      <div class="cause-stat-label">Wells Affected</div>
+    </div>
+    <div class="cause-stat-card">
+      <div class="cause-stat-num" id="stat-last-shut">—</div>
+      <div class="cause-stat-label">Last Shut-in</div>
+    </div>
+  </div>
+
+  <div class="section-header">
+    <div class="section-label">Shutdown Event Register</div>
+    <div class="section-line"></div>
+    <div style="font-size:10px;color:var(--text-muted);font-family:var(--mono);white-space:nowrap;">SHUT-IN EVENTS ONLY</div>
+  </div>
+
+  <div class="causes-table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Date &amp; Time</th>
+          <th style="text-align:left;">Well</th>
+          <th style="text-align:left;">Event</th>
+          <th style="text-align:left;">Cause / Description</th>
+        </tr>
+      </thead>
+      <tbody id="causes-tbody">
+        <tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:30px;font-family:var(--mono);">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+</div>
+
+<!-- ── Footer ──────────────────────────────────────────────────────────────── -->
+<footer class="footer">
+  <span>WHP Dashboard v2 · Excel → Python → HTML</span>
+  <span id="footer-count">—</span>
+</footer>
+
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+  JAVASCRIPT
+══════════════════════════════════════════════════════════════════════════ -->
+<script>
+
+// ── Config ──────────────────────────────────────────────────────────────────
+// API_BASE auto-detects the server address.
+// Works whether opened as http://127.0.0.1:5000 (local)
+// or http://192.168.1.x:5000 (network / intranet) — no manual changes needed.
+const API_BASE   = window.location.origin;
+const API_DATA   = API_BASE + "/data";
+const API_EVENTS = API_BASE + "/events";
+const API_CONFIG = API_BASE + "/config";
+
+let REFRESH_MS   = 5000;   // default; overwritten by /config response
+const BAR_COLORS = ["#1e90d4","#22c97a","#b06cf0","#f0c030","#e0724a","#60b4f0"];
+
+// Current filter state for notifications tab
+let currentFilter = "ALL";
+
+// ── Load server config (title, subtitle, refresh rate) ───────────────────────
+async function loadServerConfig() {
+  try {
+    const res  = await fetch(API_CONFIG, { cache: "no-store" });
+    if (!res.ok) return;
+    const cfg  = await res.json();
+    // Update page title and header from server config
+    if (cfg.title)    {
+      document.title = cfg.title;
+      document.getElementById("header-title").textContent = cfg.title;
+    }
+    if (cfg.subtitle) document.getElementById("header-subtitle").textContent = cfg.subtitle;
+    if (cfg.refresh_ms) REFRESH_MS = cfg.refresh_ms;
+  } catch {
+    // Config fetch failure is non-fatal — use defaults
+  }
+}
+
+// ── Clock ────────────────────────────────────────────────────────────────────
+function updateClock() {
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("en-IN", { hour12: false });
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Tab switching ────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("active"));
+  document.getElementById("tab-btn-" + name).classList.add("active");
+  document.getElementById("pane-" + name).classList.add("active");
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function fmt(val, decimals = 0) {
+  const n = parseFloat(val);
+  if (!n || isNaN(n)) return `<span class="num-zero">—</span>`;
+  return n.toLocaleString("en-IN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+function badge(status) {
+  const s = (status || "").toString().toUpperCase().trim();
+  if (s === "ON")   return `<span class="badge badge-on">ON</span>`;
+  if (s === "SHUT") return `<span class="badge badge-shut">SHUT</span>`;
+  if (s === "TEST") return `<span class="badge badge-test">TEST</span>`;
+  return `<span class="badge badge-other">${s || "—"}</span>`;
+}
+
+function eventBadge(type) {
+  if (type === "SHUT") return `<span class="badge badge-shut">SHUT IN</span>`;
+  if (type === "ON")   return `<span class="badge badge-on">STARTED</span>`;
+  if (type === "TEST") return `<span class="badge badge-test">TEST</span>`;
+  return `<span class="badge badge-note">NOTE</span>`;
+}
+
+function dotClass(type) {
+  const map = { SHUT: "dot-shut", ON: "dot-on", TEST: "dot-test", NOTE: "dot-note" };
+  return map[type] || "dot-note";
+}
+
+function cardClass(type) {
+  const map = { SHUT: "card-shut", ON: "card-on", TEST: "card-test", NOTE: "card-note" };
+  return map[type] || "card-note";
+}
+
+// ── Error / connection state ─────────────────────────────────────────────────
+function showError(msg) {
+  document.getElementById("error-msg").textContent = msg;
+  document.getElementById("error-banner").classList.add("visible");
+  document.getElementById("status-dot").className  = "status-dot error";
+  document.getElementById("status-text").textContent = "Offline";
+}
+function hideError() {
+  document.getElementById("error-banner").classList.remove("visible");
+  document.getElementById("status-dot").className  = "status-dot live";
+  document.getElementById("status-text").textContent = "Live";
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TAB 1 RENDERERS
+// ════════════════════════════════════════════════════════════════════════════
+
+function renderKPIs(kpi) {
+  document.getElementById("kpi-oil").textContent    = kpi.total_oil.toLocaleString("en-IN");
+  document.getElementById("kpi-gas").textContent    = kpi.total_gas.toFixed(2);
+  document.getElementById("kpi-water").textContent  = kpi.total_water.toLocaleString("en-IN");
+  document.getElementById("kpi-wells").textContent       = kpi.wells_on;
+  document.getElementById("kpi-wells-total").textContent = `/ ${kpi.wells_total}`;
+  document.getElementById("kpi-wells-card").className =
+    kpi.wells_on < kpi.wells_total ? "kpi-card red" : "kpi-card green";
+}
+
+function renderTable(wells) {
+  const tbody = document.getElementById("well-tbody");
+  if (!wells || wells.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:30px;font-family:var(--mono);">No data in Wells sheet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = wells.map(w => {
+    const status   = (w.Status || "").toString().toUpperCase().trim();
+    const isShut   = status === "SHUT";
+    const chokePct = Math.min((parseFloat(w.Choke) || 0) / 64 * 100, 100).toFixed(0);
+    const chokeHTML = isShut
+      ? `<span class="num-zero">—</span>`
+      : `<div class="choke-wrap">${fmt(w.Choke)}/64
+           <div class="choke-bar"><div class="choke-fill" style="width:${chokePct}%"></div></div>
+         </div>`;
+    return `
+      <tr class="${isShut ? "row-shut" : ""}">
+        <td class="td-well">${w.Well || "—"}</td>
+        <td>${badge(w.Status)}</td>
+        <td>${chokeHTML}</td>
+        <td class="num-press">${fmt(w.WHP)}</td>
+        <td class="num-press">${fmt(w.THP)}</td>
+        <td class="num-oil">${fmt(w.Oil)}</td>
+        <td class="num-gas">${fmt(w.Gas, 2)}</td>
+        <td class="num-water">${fmt(w.Water)}</td>
+      </tr>`;
+  }).join("");
+}
+
+function renderContrib(wells) {
+  const el = document.getElementById("contrib-chart");
+  const onWells  = wells.filter(w => (w.Status || "").toString().toUpperCase().trim() === "ON");
+  const totalOil = onWells.reduce((s, w) => s + (parseFloat(w.Oil) || 0), 0);
+  if (totalOil === 0) { el.innerHTML = `<div style="color:var(--text-muted);font-size:12px;">No production.</div>`; return; }
+  el.innerHTML = wells.map((w, i) => {
+    const oil = parseFloat(w.Oil) || 0;
+    const pct = totalOil > 0 ? (oil / totalOil * 100).toFixed(1) : 0;
+    const col = BAR_COLORS[i % BAR_COLORS.length];
+    return `<div class="contrib-row">
+      <div class="contrib-well">${w.Well || "?"}</div>
+      <div class="contrib-track"><div class="contrib-fill" style="width:${pct}%;background:${col};"></div></div>
+      <div class="contrib-val" style="color:${col};">${oil.toLocaleString("en-IN")} <span style="font-size:10px;color:var(--text-muted)">(${pct}%)</span></div>
+    </div>`;
+  }).join("");
+}
+
+// Recent events mini panel on production tab
+function renderRecentEventsPanel(events) {
+  const el = document.getElementById("recent-events-panel");
+  if (!events || events.length === 0) {
+    el.innerHTML = `<div style="color:var(--text-muted);font-size:12px;font-family:var(--mono);">No events logged yet.<br><br>Add rows to the EventLog sheet in production.xlsx to see events here.</div>`;
+    return;
+  }
+  const recent = events.slice(0, 3);
+  el.innerHTML = recent.map(e => `
+    <div style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
+      <div style="width:10px;height:10px;border-radius:50%;margin-top:3px;flex-shrink:0;
+        background:${e.event_type==="SHUT"?"var(--red)":e.event_type==="ON"?"var(--green)":e.event_type==="TEST"?"var(--yellow)":"var(--accent)"};"></div>
+      <div>
+        <div style="font-size:12px;color:var(--text-pri);font-weight:600;">${e.message}</div>
+        <div style="font-size:11px;color:var(--text-muted);font-family:var(--mono);margin-top:2px;">${e.datetime_display}</div>
+      </div>
+    </div>
+  `).join("") + `<div style="margin-top:10px;font-size:11px;color:var(--text-muted);">
+    <a href="#" onclick="switchTab('notifications');return false;" style="color:var(--accent);text-decoration:none;">View all events →</a>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TAB 2 RENDERERS — NOTIFICATIONS
+// ════════════════════════════════════════════════════════════════════════════
+
+function renderNotifications(events) {
+  const el = document.getElementById("notification-timeline");
+
+  if (!events || events.length === 0) {
+    el.innerHTML = `<div class="empty-state"><div class="icon">📋</div>No events in EventLog sheet yet.<br><br>Add rows to the EventLog sheet in production.xlsx.</div>`;
+    return;
+  }
+
+  // Update notification badge count (SHUT events only — these are the alerts)
+  const shutCount = events.filter(e => e.event_type === "SHUT").length;
+  const badge     = document.getElementById("notif-badge");
+  if (shutCount > 0) {
+    badge.textContent = shutCount;
+    badge.classList.add("visible");
+  } else {
+    badge.classList.remove("visible");
+  }
+
+  // Build timeline items
+  el.innerHTML = events.map(e => {
+    const causeBlock = e.cause
+      ? `<div style="margin-top:8px;">
+           <div class="tc-cause-label">Cause / Remarks</div>
+           <div class="tc-cause">${e.cause}</div>
+         </div>`
+      : "";
+    return `
+      <div class="timeline-item" data-type="${e.event_type}">
+        <div class="timeline-dot ${dotClass(e.event_type)}"></div>
+        <div class="timeline-card ${cardClass(e.event_type)}">
+          <div class="tc-header">
+            ${eventBadge(e.event_type)}
+            <div class="tc-message">${e.message}</div>
+            <div class="tc-time">${e.datetime_display}</div>
+          </div>
+          ${causeBlock}
+        </div>
+      </div>`;
+  }).join("");
+
+  // Re-apply current filter
+  applyFilter(currentFilter, false);
+}
+
+// Filter pills
+function applyFilter(type, updateState = true) {
+  if (updateState) currentFilter = type;
+
+  // Update pill styles
+  document.querySelectorAll(".filter-pill").forEach(p => {
+    p.classList.remove("active-all","active-shut","active-on","active-test","active-note");
+  });
+  const map = { ALL:"active-all", SHUT:"active-shut", ON:"active-on", TEST:"active-test", NOTE:"active-note" };
+  document.getElementById("filter-" + type.toLowerCase()).classList.add(map[type]);
+
+  // Show/hide timeline items
+  document.querySelectorAll(".timeline-item").forEach(item => {
+    const t = item.dataset.type;
+    item.classList.toggle("hidden", type !== "ALL" && t !== type);
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TAB 3 RENDERERS — SHUTDOWN CAUSES
+// ════════════════════════════════════════════════════════════════════════════
+
+function renderCauses(events) {
+  // Filter to SHUT events only
+  const shutEvents = events.filter(e => e.event_type === "SHUT");
+
+  // Summary stats
+  const wellsAffected = new Set(shutEvents.map(e => e.well)).size;
+  document.getElementById("stat-total-shut").textContent    = shutEvents.length;
+  document.getElementById("stat-wells-affected").textContent = wellsAffected;
+  document.getElementById("stat-last-shut").textContent     =
+    shutEvents.length > 0 ? shutEvents[0].well : "—";
+
+  const tbody = document.getElementById("causes-tbody");
+
+  if (shutEvents.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:40px;font-family:var(--mono);">No shutdown events in EventLog yet.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = shutEvents.map(e => `
+    <tr>
+      <td style="font-family:var(--mono);font-size:12px;white-space:nowrap;color:var(--text-dim);">
+        ${e.datetime_display}
+      </td>
+      <td style="text-align:left;">
+        <span style="font-family:var(--mono);font-weight:700;color:var(--accent);">${e.well}</span>
+      </td>
+      <td style="text-align:left;">${eventBadge(e.event_type)}</td>
+      <td class="td-cause">${e.cause || '<span style="color:var(--text-muted)">No cause recorded</span>'}</td>
+    </tr>`
+  ).join("");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// FETCH FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+
+async function fetchData() {
+  try {
+    const res = await fetch(API_DATA, { cache: "no-store" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showError(err.error || `Server error ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    if (!data.wells || !data.kpi) { showError("Unexpected response from /data"); return; }
+    hideError();
+    renderKPIs(data.kpi);
+    renderTable(data.wells);
+    renderContrib(data.wells);
+    const now = new Date().toLocaleTimeString("en-IN", { hour12: false });
+    document.getElementById("update-time").textContent = now;
+    document.getElementById("footer-count").textContent = `${data.wells.length} wells · ${now}`;
+  } catch {
+    showError("Cannot reach server.py — is it running?  (python server.py)");
+  }
+}
+
+async function fetchEvents() {
+  try {
+    const res = await fetch(API_EVENTS, { cache: "no-store" });
+    if (!res.ok) return;  // Silently skip — events are optional
+    const data = await res.json();
+    const events = data.events || [];
+    renderRecentEventsPanel(events);
+    renderNotifications(events);
+    renderCauses(events);
+  } catch {
+    // Events endpoint failure is non-fatal — don't crash the whole dashboard
+    console.warn("Could not fetch events");
+  }
+}
+
+// ── Start polling ────────────────────────────────────────────────────────────
+(async () => {
+  await loadServerConfig();
+  fetchData();
+  fetchEvents();
+  setInterval(fetchData,   REFRESH_MS);
+  setInterval(fetchEvents, REFRESH_MS);
+})();
+
+</script>
+</body>
+</html>

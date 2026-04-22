@@ -1,0 +1,41 @@
+{
+  "excel": {
+    "filename": "production.xlsx",
+    "wells_sheet": "Wells",
+    "eventlog_sheet": "EventLog",
+
+    "column_map": {
+      "Well":   "Well",
+      "Status": "Status",
+      "Choke":  "Choke",
+      "WHP":    "WHP",
+      "THP":    "THP",
+      "Oil":    "Oil",
+      "Gas":    "Gas",
+      "Water":  "Water"
+    },
+
+    "eventlog_column_map": {
+      "DateTime": "DateTime",
+      "Well":     "Well",
+      "Event":    "Event",
+      "Cause":    "Cause"
+    },
+
+    "status_on":   ["ON", "PRODUCING", "OPEN", "FLOWING", "ONLINE"],
+    "status_shut": ["SHUT", "SHUT-IN", "SHUTIN", "CLOSED", "OFF"],
+    "status_test": ["TEST", "TESTING", "ON TEST"]
+  },
+
+  "server": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "refresh_ms": 5000
+  },
+
+  "dashboard": {
+    "title":    "RATNA Production Dashboard",
+    "subtitle": "ONGC Offshore · Surface Operations · Live Data",
+    "platform": "RATNA FIELD"
+  }
+}
