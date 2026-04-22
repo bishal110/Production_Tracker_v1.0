@@ -340,7 +340,6 @@ if __name__ == "__main__":
         arrow = "  (same)" if k == v else f"→ maps to '{v}' in your Excel"
         print(f"    {k:10s} {arrow}")
     print()
-import os
     port = int(os.environ.get("PORT", SERVER_PORT))
     print(f"  ┌─────────────────────────────────────────────────┐")
     print(f"  │  LOCAL    : http://127.0.0.1:{SERVER_PORT}              │")
@@ -353,5 +352,4 @@ import os
     print()
     print("  Ctrl+C to stop.")
     print("=" * 65 + "\n")
-
     app.run(host="0.0.0.0", port=port,debug=False)
