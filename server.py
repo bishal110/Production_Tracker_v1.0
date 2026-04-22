@@ -341,7 +341,7 @@ if __name__ == "__main__":
         print(f"    {k:10s} {arrow}")
     print()
 import os
-port = int(os.environ.get("PORT", SERVER_PORT)))
+port = int(os.environ.get("PORT", SERVER_PORT))
     print(f"  ┌─────────────────────────────────────────────────┐")
     print(f"  │  LOCAL    : http://127.0.0.1:{SERVER_PORT}              │")
     print(f"  │  NETWORK  : http://{local_ip}:{SERVER_PORT}        │")
